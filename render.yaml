@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: wirejournal
+    runtime: go
+    plan: free
+    buildCommand: go build -o wirejournal ./cmd/wirejournal
+    startCommand: ./wirejournal demo
+    healthCheckPath: /healthz
+    envVars:
+      - key: WJ_STEPS
+        value: "16"
