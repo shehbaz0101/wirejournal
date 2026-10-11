@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/shehbaz0101/wirejournal/internal/proxy"
 	"github.com/shehbaz0101/wirejournal/internal/run"
 )
 
@@ -64,9 +63,35 @@ func mcpEnv(t *testing.T, rules map[string]Rule) (*httptest.Server, *mailStub, *
 	t.Cleanup(func() { st.Close() })
 	u, _ := url.Parse(up.URL)
 	h := &Handler{Store: st, Upstream: u, Rules: rules}
-	srv := httptest.NewServer(&proxy.Server{Store: st, MCP: h})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /r/{run}/a/{attempt}/mcp or /r/{run}/mcp
+		parts := splitPath(r.URL.Path)
+		runID, attempt := "job", ""
+		if len(parts) >= 2 && parts[0] == "r" {
+			runID = parts[1]
+		}
+		if len(parts) >= 4 && parts[2] == "a" {
+			attempt = parts[3]
+		}
+		rn, err := st.Run(runID, true)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		h.ServeMCP(w, r, rn, attempt)
+	}))
 	t.Cleanup(srv.Close)
 	return srv, stub, st
+}
+
+func splitPath(p string) []string {
+	var out []string
+	for _, s := range strings.Split(strings.Trim(p, "/"), "/") {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func postMCP(t *testing.T, srv *httptest.Server, path, body string) (int, string, http.Header) {
