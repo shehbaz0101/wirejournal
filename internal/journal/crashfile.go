@@ -40,6 +40,14 @@ func (c *CrashFile) LosePower(tear int, zeros bool) {
 	c.durable = append([]byte(nil), c.data...)
 }
 
+// DurableCopy returns what would survive if power failed now.
+func (c *CrashFile) DurableCopy() *CrashFile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	d := append([]byte(nil), c.durable...)
+	return &CrashFile{data: d, durable: append([]byte(nil), d...)}
+}
+
 func (c *CrashFile) ReadAt(p []byte, off int64) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
