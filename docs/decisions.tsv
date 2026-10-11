@@ -32,3 +32,4 @@ ts	phase	decision	why	evidence	result
 2026-10-11T05:46:00Z	verify	assert leftover non-honor intent quarantines on Open; honor-key leftover does not	closes the surviving sealRecovery mutants	go test -race ./internal/run those tests; /tmp/wj-mut2 both killed	pass
 2026-10-11T05:47:00Z	verify	scripts/verify-demo.sh on this pickup: WJ 336 tokens 1 email, baseline 672 tokens 2 emails, replayed 8	prove the live user path after leftover commit	/tmp/wj-verify-pickup/evidence/after.json	pass
 2026-10-11T05:47:30Z	review	add scripts/verify-demo.sh to CI; trail Attention on composer-2.5	Attention flagged that CI never drove the demo script	.github/workflows/ci.yml	open
+2026-10-11T05:49:00Z	review	PR #1 marked ready against main at a456294	opening-a-pr: Why/What/Scope/Tradeoffs/Blast Radius/Verification; leftover review-gate and sealRecovery lock are on the branch	https://github.com/shehbaz0101/wirejournal/pull/1	open
