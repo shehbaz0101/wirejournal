@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/shehbaz0101/wirejournal/internal/agent"
+	"github.com/shehbaz0101/wirejournal/internal/bench"
 	"github.com/shehbaz0101/wirejournal/internal/llmproxy"
 	"github.com/shehbaz0101/wirejournal/internal/mcpgw"
 	"github.com/shehbaz0101/wirejournal/internal/mockllm"
@@ -33,6 +34,8 @@ func main() {
 		err = cmdListen(os.Args[2:], &mockmail.Server{})
 	case "agent":
 		err = cmdAgent(os.Args[2:])
+	case "bench":
+		err = bench.Main(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)

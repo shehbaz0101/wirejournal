@@ -22,6 +22,7 @@ type Stats struct {
 
 type Server struct {
 	Delay time.Duration
+	After func()
 
 	mu    sync.Mutex
 	keys  map[string]struct{}
@@ -118,6 +119,9 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, id, params json.Ra
 			s.inbox = append(s.inbox, Message{To: p.Arguments["to"], Subject: p.Arguments["subject"], Body: p.Arguments["body"], Key: key})
 		}
 		s.mu.Unlock()
+		if s.After != nil {
+			s.After()
+		}
 		if d := s.Delay; d > 0 {
 			time.Sleep(d)
 		}

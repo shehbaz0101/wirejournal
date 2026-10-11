@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/shehbaz0101/wirejournal/internal/script"
 )
@@ -18,6 +19,9 @@ type Stats struct {
 }
 
 type Server struct {
+	Delay time.Duration
+	After func(step int)
+
 	mu    sync.Mutex
 	stats Stats
 }
@@ -69,6 +73,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	s.stats.PromptTokens += p
 	s.stats.CompletionTokens += c
 	s.mu.Unlock()
+	if s.After != nil {
+		s.After(step)
+	}
+	if s.Delay > 0 {
+		time.Sleep(s.Delay)
+	}
 
 	if req.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
