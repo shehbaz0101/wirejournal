@@ -47,6 +47,12 @@ func TestDemoCrashAndResume(t *testing.T) {
 	if !strings.Contains(string(page), "Crash (kill -9)") {
 		t.Fatal("ui missing crash button")
 	}
+	if !strings.Contains(string(page), "font-synthesis: none") {
+		t.Fatal("ui missing font-synthesis:none; synthetic bold doubles glyphs")
+	}
+	if strings.Contains(string(page), "<b>") || strings.Contains(string(page), "<strong>") {
+		t.Fatal("ui uses <b>/<strong>; those default to weight 700 and fake-bold on this host")
+	}
 
 	deadline := time.Now().Add(20 * time.Second)
 	for {

@@ -230,7 +230,7 @@ func (d *Demo) start(l *laneState) {
 
 func (d *Demo) reset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "POST", 405)
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
 		return
 	}
 	d.mu.Lock()
@@ -268,7 +268,7 @@ func (d *Demo) reset(w http.ResponseWriter, r *http.Request) {
 
 func (d *Demo) crash(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "POST", 405)
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
 		return
 	}
 	d.mu.Lock()
@@ -293,7 +293,7 @@ func (d *Demo) crash(w http.ResponseWriter, r *http.Request) {
 func (d *Demo) events(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "no flush", 500)
+		http.Error(w, "no flush", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
