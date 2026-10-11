@@ -718,6 +718,9 @@ func TestIntentWithoutCommitFailsClosedAndQuarantines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !r2.Status().Quarantined {
+		t.Fatal("leftover non-honor intent must quarantine on Open, before any Do")
+	}
 	out, err := r2.Do(context.Background(), "", c, &tape{}, up)
 	if err != nil {
 		t.Fatal(err)
@@ -762,6 +765,9 @@ func TestAmbiguousWithIdempotencyKeyRedispatches(t *testing.T) {
 	r2, err := Open("job", cf)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if r2.Status().Quarantined {
+		t.Fatal("honor-key leftover must not quarantine on Open")
 	}
 	tp := &tape{}
 	out, err := r2.Do(context.Background(), "", c, tp, up)

@@ -26,3 +26,5 @@ jobs:
         run: go test -race -count=1 -timeout 15m ./...
       - name: bench smoke
         run: go test -count=1 -timeout 5m ./internal/bench
+      - name: verify demo
+        run: scripts/verify-demo.sh
