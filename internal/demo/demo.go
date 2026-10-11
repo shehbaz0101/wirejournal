@@ -61,6 +61,8 @@ type laneState struct {
 	mailURL      string
 	store        *run.Store
 	pxURL        string
+	px           *proxy.Server
+	mcp          *mcpgw.Handler
 	bin          string
 	cfg          string
 	data         string
@@ -146,11 +148,13 @@ func newLane(name, bin, cfg string, journal bool) (*laneState, error) {
 		l.store = st
 		lu, _ := url.Parse(l.llmURL)
 		mu, _ := url.Parse(l.mailURL)
+		mcp := &mcpgw.Handler{Store: st, Upstream: mu, Rules: map[string]mcpgw.Rule{"send_email": {Class: run.ClassSideEffect, HonorKey: true}}}
 		h := &proxy.Server{
 			Store: st,
 			LLM:   &llmproxy.Handler{Upstream: lu},
-			MCP:   &mcpgw.Handler{Store: st, Upstream: mu, Rules: map[string]mcpgw.Rule{"send_email": {Class: run.ClassSideEffect, HonorKey: true}}},
+			MCP:   mcp,
 		}
+		l.px, l.mcp = h, mcp
 		l.pxURL = serveLocal(h)
 	}
 	return l, nil
@@ -248,17 +252,27 @@ func (d *Demo) reset(w http.ResponseWriter, r *http.Request) {
 	d.wj.state, d.base.state = "idle", "idle"
 	if d.wj.store != nil {
 		d.wj.store.Close()
-		dir, _ := os.MkdirTemp("", "wj-demo-")
-		d.wj.data = dir
-		d.wj.store, _ = run.NewStore(dir)
-		lu, _ := url.Parse(d.wj.llmURL)
-		mu, _ := url.Parse(d.wj.mailURL)
-		h := &proxy.Server{
-			Store: d.wj.store,
-			LLM:   &llmproxy.Handler{Upstream: lu},
-			MCP:   &mcpgw.Handler{Store: d.wj.store, Upstream: mu, Rules: map[string]mcpgw.Rule{"send_email": {Class: run.ClassSideEffect, HonorKey: true}}},
+		dir, err := os.MkdirTemp("", "wj-demo-")
+		if err != nil {
+			d.mu.Unlock()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-		d.wj.pxURL = serveLocal(h)
+		st, err := run.NewStore(dir)
+		if err != nil {
+			d.mu.Unlock()
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		d.wj.data = dir
+		d.wj.store = st
+		mu, _ := url.Parse(d.wj.mailURL)
+		mcp := &mcpgw.Handler{Store: st, Upstream: mu, Rules: map[string]mcpgw.Rule{"send_email": {Class: run.ClassSideEffect, HonorKey: true}}}
+		if d.wj.px != nil {
+			d.wj.px.Store = st
+			d.wj.px.MCP = mcp
+		}
+		d.wj.mcp = mcp
 	}
 	d.mu.Unlock()
 	d.startBoth()
@@ -348,24 +362,26 @@ func (d *Demo) view(l *laneState) LaneView {
 	d.mu.Lock()
 	state := l.state
 	callsAtStart := l.callsAtStart
+	var replayed, live, saved int
+	if l.journal && l.store != nil {
+		if rn, err := l.store.Run("job", false); err == nil {
+			s := rn.Status()
+			if n := len(s.Attempts); n > 0 {
+				a := s.Attempts[n-1]
+				replayed, live, saved = a.ModelReplayed, a.ModelLive, a.TokensSaved
+			}
+		}
+	}
 	d.mu.Unlock()
 	st := l.llm.Stats()
 	mail := l.mail.Stats()
 	v := LaneView{
 		Steps: d.steps, TokensBilled: st.PromptTokens + st.CompletionTokens,
 		Deliveries: mail.Deliveries, State: state,
+		Replayed: replayed, Live: live, TokensSaved: saved,
 	}
 	for i, m := range mail.Inbox {
 		v.Inbox = append(v.Inbox, Message{To: m.To, Subject: m.Subject, Dup: i > 0})
-	}
-	if l.journal && l.store != nil {
-		if rn, err := l.store.Run("job", false); err == nil {
-			s := rn.Status()
-			if n := len(s.Attempts); n > 0 {
-				a := s.Attempts[n-1]
-				v.Replayed, v.Live, v.TokensSaved = a.ModelReplayed, a.ModelLive, a.TokensSaved
-			}
-		}
 	}
 	if l.journal {
 		v.Step = v.Replayed + v.Live
