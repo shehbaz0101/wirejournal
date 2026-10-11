@@ -20,7 +20,7 @@ Preconditions:
 - Not `go test -short`. Those tests skip.
 - The host can `SIGKILL` child processes.
 
-- **Integration.** `go test -count=1 -timeout 5m ./internal/bench -run TestCrashRecoveryVsBaseline`. Wirejournal median extra calls must be 0. Baseline median extra calls must be at least 1.
+- **Integration.** `go test -count=1 -timeout 5m ./internal/bench -run TestCrashRecoveryVsBaseline`. Wirejournal median extra calls must be 0. Baseline median extra calls must be at least 1. A kill-both trial may re-bill one in-flight call (max extra 1 on the published 30-seed table).
 - **In-flight.** `go test -count=1 ./internal/bench -run TestAgentOnlyDoesNotRebillInFlight`.
 - **Ambiguous window.** `go test -count=1 ./internal/bench -run TestDispatchWindowHonorKeyNoDuplicate`. Inbox length stays 1.
 

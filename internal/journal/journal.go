@@ -89,7 +89,7 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 // keep payload. If visit returns an error, Open returns it and leaves the
 // file unchanged.
 func Open(path string, visit func(off int64, payload []byte) error) (*Log, Report, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, Report{}, err
 	}

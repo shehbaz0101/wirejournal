@@ -32,7 +32,7 @@ type Store struct {
 }
 
 func NewStore(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	return &Store{dir: dir, runs: map[string]*Run{}}, nil
@@ -61,6 +61,7 @@ func (s *Store) Run(id string, create bool) (*Run, error) {
 		return nil, err
 	}
 	r.log = l
+	r.sealRecovery()
 	s.runs[id] = r
 	return r, nil
 }
@@ -84,6 +85,7 @@ func Open(id string, f journal.File) (*Run, error) {
 		return nil, err
 	}
 	r.log = l
+	r.sealRecovery()
 	return r, nil
 }
 
@@ -192,9 +194,6 @@ func (r *Run) apply(off int64, payload []byte) error {
 			return corrupt(off, "second intent for %s/%d", rec.Label, rec.K)
 		}
 		r.entries[k] = &entry{key: k, state: stateAmbiguous, canon: rec.Canon, label: rec.Label, class: rec.Class, honor: rec.HonorKey, intended: true}
-		if !rec.HonorKey {
-			r.quarantined = true
-		}
 	case recCommit:
 		if rec.Resp == nil {
 			return corrupt(off, "commit without a response")
@@ -222,6 +221,18 @@ func (r *Run) apply(off int64, payload []byte) error {
 	}
 	r.lastAttempt = max(r.lastAttempt, rec.A)
 	return nil
+}
+
+// sealRecovery sets quarantine from leftover ambiguous side effects only.
+// A later commit for the same intent must leave the run usable.
+func (r *Run) sealRecovery() {
+	r.quarantined = false
+	for _, e := range r.entries {
+		if e.state == stateAmbiguous && !e.honor {
+			r.quarantined = true
+			return
+		}
+	}
 }
 
 type action uint8
@@ -274,6 +285,14 @@ func (r *Run) Do(ctx context.Context, attemptID string, c Call, w Writer, up Ups
 			select {
 			case <-done:
 			case <-ctx.Done():
+				r.mu.Lock()
+				if at.occ[ok] == k.k {
+					at.occ[ok]--
+					if c.Kind == KindLLM && at.modelSteps == step {
+						at.modelSteps--
+					}
+				}
+				r.mu.Unlock()
 				return Outcome{}, ctx.Err()
 			}
 			r.mu.Lock()

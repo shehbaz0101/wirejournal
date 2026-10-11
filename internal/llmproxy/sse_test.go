@@ -1,6 +1,8 @@
 package llmproxy
 
 import (
+	"io"
+	"net/http"
 	"testing"
 )
 
@@ -24,6 +26,33 @@ func TestSplitSSE(t *testing.T) {
 	frames, leftover, done = splitSSE(crlf)
 	if len(frames) != 1 || !isDone(done) || len(leftover) != 0 {
 		t.Fatalf("crlf: frames=%q done=%q leftover=%q", frames, done, leftover)
+	}
+}
+
+type frameCap struct{ frames [][]byte }
+
+func (f *frameCap) Head(int, string) {}
+func (f *frameCap) Frame(p []byte)   { f.frames = append(f.frames, append([]byte(nil), p...)) }
+
+func TestReadStreamKeepsDONEAfterTrailingRead(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("data: {\"v\":1}\n\ndata: [DONE]\n\n"))
+		_, _ = pw.Write([]byte("\n"))
+		_ = pw.Close()
+	}()
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       pr,
+	}
+	cap := &frameCap{}
+	got, err := readStream(resp, cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isDone(got.Tail) {
+		t.Fatalf("lost [DONE]: tail=%q frames=%d", got.Tail, len(cap.frames))
 	}
 }
 

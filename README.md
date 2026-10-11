@@ -1,15 +1,15 @@
 # wirejournal
 
-A drop-in proxy that journals an agent's LLM and MCP calls. After `kill -9`, the next process replays finished work from disk. It does not re-bill those model calls and it does not send the email again.
+A drop-in proxy that journals an agent's LLM and MCP calls. After `kill -9`, the next process replays finished work from disk.
 
-**Measured, 30 interleaved `kill -9` trials, 200-step agent.** Ground truth is the mock LLM billing ledger and the mock mail delivery counter, not the proxy's own `/status`. Method and raw trials are in [`docs/bench.md`](docs/bench.md).
+**Measured, 30 interleaved `kill -9` trials, 200-step agent.** Ground truth is the mock LLM billing ledger and the mock mail delivery counter, not the proxy's own `/status`. Extra calls are `mockllm.Stats.Calls` after resume minus 200. Method and raw trials are in [`docs/bench.md`](docs/bench.md).
 
 | arm | resume to the crash point | extra model calls | extra tokens | emails delivered |
 |---|---|---|---|---|
-| wirejournal | **233 ms** (20-454) | **0** (max 0) | **0** | **1** (max 1) |
-| baseline | 132 ms (7-290) | **145** (max 199) | 45820 (max 84376) | 1 (max **2**; 2/30 trials sent a second email) |
+| wirejournal | **166 ms** (19-388) | **0** (max 1) | **0** (max 688) | **1** (max 1) |
+| baseline | 96 ms (6-208) | **147** (max 200) | 47040 (max 85200) | 1 (max **2**; 2/30 trials sent a second email) |
 
-Baseline "resume" is a full re-run of the prefix, so it can use less CPU time than journal replay. The product claim is zero re-billing and at-most-once mail.
+Baseline "resume" is a full re-run of the prefix, so it can use less CPU time than journal replay. The product claim is low re-billing and at-most-once mail. One wirejournal trial re-billed a single in-flight call that the mock accepted before the journal commit.
 
 The 16-step live demo on this host, crashed after `send_email`: wirejournal finished at **928 tokens billed, 1 email**. Baseline finished at **1856 tokens billed, 2 emails**. Replay of the journaled prefix completed inside the 500 ms snapshot after the crash.
 

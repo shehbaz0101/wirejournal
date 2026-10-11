@@ -240,6 +240,22 @@ func TestSSEForwardsFramesThenDONEAfterCommit(t *testing.T) {
 	}
 }
 
+func TestStreamedHTTPErrorWritesBody(t *testing.T) {
+	e := startEnv(t, false, 429, `{"error":"slow"}`)
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}]}`
+	st, b, _ := read(t, post(t, e, "/r/job/a/1/v1/chat/completions", body, ""))
+	if st != 429 || !strings.Contains(b, "slow") {
+		t.Fatalf("live streamed 429: %d %s", st, b)
+	}
+	st, b2, h := read(t, post(t, e, "/r/job/a/2/v1/chat/completions", body, ""))
+	if st != 429 || !strings.Contains(b2, "slow") || h.Get("X-Wirejournal-Replay") != "1" {
+		t.Fatalf("replay streamed 429: %d %s %v", st, b2, h)
+	}
+	if e.hits.Load() != 1 {
+		t.Fatalf("billed %d", e.hits.Load())
+	}
+}
+
 func TestHTTPErrorIsJournaled(t *testing.T) {
 	e := startEnv(t, false, 429, `{"error":"slow"}`)
 	body := `{"model":"m","messages":[{"role":"user","content":"x"}]}`

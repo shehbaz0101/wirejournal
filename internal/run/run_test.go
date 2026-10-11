@@ -409,6 +409,46 @@ func TestInFlightCallIsSharedWithTheNextAttempt(t *testing.T) {
 	}
 }
 
+func TestCancelledWaitDoesNotBurnOccurrence(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	defer s.Close()
+	r := openRun(t, s, "job")
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	f := &fake{respond: func(n int64, c Call) (*Response, error) {
+		once.Do(func() { close(started) })
+		<-gate
+		return unary(n, c)
+	}}
+	a := llm("a", "slow")
+	go func() { _, _ = r.Do(context.Background(), "1", a, &tape{}, f.up(a)) }()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waitErr := make(chan error, 1)
+	go func() {
+		_, err := r.Do(ctx, "2", a, &tape{}, f.up(a))
+		waitErr <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if err := <-waitErr; err == nil {
+		t.Fatal("cancelled wait returned nil")
+	}
+
+	close(gate)
+	time.Sleep(20 * time.Millisecond)
+	tp := &tape{}
+	out, err := r.Do(context.Background(), "2", a, tp, f.up(a))
+	if err != nil || !out.Replay {
+		t.Fatalf("retry after cancel: replay=%v err=%v %s", out.Replay, err, tp)
+	}
+	if f.calls.Load() != 1 {
+		t.Fatalf("billed %d, want 1", f.calls.Load())
+	}
+}
+
 func TestClientDisconnectDoesNotCancelUpstream(t *testing.T) {
 	dir := t.TempDir()
 	s := openStore(t, dir)
@@ -638,6 +678,16 @@ func TestSideEffectReplaysAndIsAtMostOnce(t *testing.T) {
 	}
 	if f.calls.Load() != 2 {
 		t.Fatalf("billed %d, want 2", f.calls.Load())
+	}
+	if r2.Status().Quarantined {
+		t.Fatal("a committed side effect must not quarantine the recovered run")
+	}
+	c2 := tool("send_email", `{"to":"c@d"}`, ClassSideEffect, false)
+	if _, o := do(t, r2, "", c2, f); o.Blocked || o.Replay {
+		t.Fatalf("second distinct email after recovery: %+v", o)
+	}
+	if f.calls.Load() != 3 {
+		t.Fatalf("second email billed %d, want 3", f.calls.Load())
 	}
 }
 

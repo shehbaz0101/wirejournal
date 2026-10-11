@@ -71,6 +71,13 @@ func TestRoundTrip(t *testing.T) {
 	if !rep.Created || rep.Records != 0 {
 		t.Fatalf("first open report = %+v, want Created and 0 records", rep)
 	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("journal mode %o, want 0600", st.Mode().Perm())
+	}
 	appendAll(t, l, "one", "two", strings.Repeat("x", 100_000))
 	if err := l.Close(); err != nil {
 		t.Fatal(err)

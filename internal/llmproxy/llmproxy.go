@@ -146,7 +146,11 @@ func readStream(resp *http.Response, e run.Emitter) (*run.Response, error) {
 		if n > 0 {
 			leftover = append(leftover, buf[:n]...)
 			var more [][]byte
-			more, leftover, done = splitSSE(leftover)
+			var term []byte
+			more, leftover, term = splitSSE(leftover)
+			if len(term) > 0 {
+				done = term
+			}
 			for _, fr := range more {
 				e.Frame(fr)
 				frames = append(frames, fr)
@@ -219,7 +223,7 @@ func (wr *writer) Frame(p []byte) {
 }
 
 func (wr *writer) Finish(r *run.Response) {
-	if wr.stream {
+	if wr.stream && (len(r.Frames) > 0 || len(r.Tail) > 0) {
 		if !wr.wrote {
 			wr.flushHead(false)
 		}

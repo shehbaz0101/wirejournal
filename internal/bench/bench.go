@@ -107,7 +107,7 @@ func Run(bin string, n, steps int, scenario string) (*Report, error) {
 		Host:  fmt.Sprintf("%s %s", runtime.GOOS, runtime.GOARCH),
 		Method: "parent holds mocks; SIGKILL children at mockllm.Calls==crashAt; " +
 			"resume_ms is time from restart until the next live mockllm call; " +
-			"extra_* and deliveries are mock ledgers, not proxy status",
+			"extra_calls is mockllm.Calls after resume minus Steps; extra_tokens is mock prompt+completion minus one full run; deliveries are the mock inbox length",
 	}
 	rng := rand.New(rand.NewSource(1))
 	for i := 0; i < n; i++ {
@@ -183,26 +183,24 @@ func one(bin, cfg string, steps int, seed int64, crashAt int, journal bool, scen
 	if !journal {
 		target = before.Calls + crashAt
 	}
-	if err := waitCalls(llmURL, target, 60*time.Second); err != nil {
-		_ = p2.WaitAgent()
-	} else {
+	waitErr := waitCalls(llmURL, target, 60*time.Second)
+	if waitErr == nil {
 		tr.ResumeMS = float64(time.Since(t0).Microseconds()) / 1000
-		_ = p2.WaitAgent()
 	}
+	_ = p2.WaitAgent()
 	after := llmS.Stats()
-	liveAfter := after.Calls - before.Calls
-	remain := max(0, steps-crashAt)
-	repeat := liveAfter - remain
-	if !journal {
-		repeat = crashAt
+	tr.ExtraCalls = after.Calls - steps
+	if tr.ExtraCalls < 0 {
+		tr.ExtraCalls = 0
 	}
-	if repeat < 0 {
-		repeat = 0
+	full := tokensFor(0, steps)
+	gotTok := after.PromptTokens + after.CompletionTokens
+	tr.ExtraTok = gotTok - full
+	if tr.ExtraTok < 0 {
+		tr.ExtraTok = 0
 	}
-	tr.ExtraCalls = repeat
-	tr.ExtraTok = tokensFor(0, repeat)
 	tr.Deliveries = mailS.Stats().Deliveries
-	tr.OK = true
+	tr.OK = waitErr == nil && after.Calls >= steps
 	return tr, nil
 }
 
