@@ -111,6 +111,7 @@ func TestDecide(t *testing.T) {
 		{"absent", nil, actLive},
 		{"pending", &entry{state: statePending}, actWait},
 		{"committed", &entry{state: stateCommitted}, actReplay},
+		{"ambiguous", &entry{state: stateAmbiguous}, actAmbiguous},
 	}
 	for _, c := range cases {
 		if got := decide(c.e); got != c.want {
@@ -606,4 +607,181 @@ func TestPowerLossDuringCommitProperty(t *testing.T) {
 			t.Fatalf("seed %d: %d live calls after recovery, want %d (or one fewer)", seed, rebilled, steps-acked)
 		}
 	}
+}
+
+func tool(name, args string, class Class, honor bool) Call {
+	return Call{Kind: KindTool, Label: name, Class: class, HonorKey: honor,
+		Canonical: []byte(fmt.Sprintf(`{"arguments":%s,"name":%q}`, args, name))}
+}
+
+func TestSideEffectReplaysAndIsAtMostOnce(t *testing.T) {
+	dir := t.TempDir()
+	f := &fake{respond: unary}
+	s := openStore(t, dir)
+	r := openRun(t, s, "job")
+	c := tool("send_email", `{"to":"a@b"}`, ClassSideEffect, false)
+	do(t, r, "", llm("a", "plan"), f)
+	got, out := do(t, r, "", c, f)
+	if out.Replay || !strings.Contains(got, "send_email") {
+		t.Fatalf("live tool: %s %+v", got, out)
+	}
+	s.Close()
+
+	s2 := openStore(t, dir)
+	defer s2.Close()
+	r2 := openRun(t, s2, "job")
+	if _, o := do(t, r2, "", llm("a", "plan"), f); !o.Replay {
+		t.Fatal("model should replay")
+	}
+	if _, o := do(t, r2, "", c, f); !o.Replay {
+		t.Fatal("committed email was sent again")
+	}
+	if f.calls.Load() != 2 {
+		t.Fatalf("billed %d, want 2", f.calls.Load())
+	}
+}
+
+func TestIntentWithoutCommitFailsClosedAndQuarantines(t *testing.T) {
+	// header, model commit, intent, then the result commit fails.
+	cf := journal.NewCrashFile()
+	r, err := Open("job", &nthFail{File: cf, fail: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{respond: unary}
+	do(t, r, "", llm("a", "plan"), f)
+	c := tool("send_email", `{"to":"a@b"}`, ClassSideEffect, false)
+	calls := 0
+	up := func(ctx context.Context, key string, e Emitter) (*Response, error) {
+		calls++
+		if key == "" {
+			t.Error("side-effect dispatch missing idempotency key")
+		}
+		return unary(1, c)
+	}
+	if _, err := r.Do(context.Background(), "", c, &tape{}, up); err == nil {
+		t.Fatal("commit failure returned nil")
+	}
+	cf.LosePower(0, false)
+
+	r2, err := Open("job", cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := r2.Do(context.Background(), "", c, &tape{}, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Blocked || !strings.Contains(out.Message, "will not repeat") {
+		t.Fatalf("ambiguous = %+v", out)
+	}
+	if calls != 1 {
+		t.Fatalf("dispatched %d times, want 1", calls)
+	}
+	c2 := tool("send_email", `{"to":"other@b"}`, ClassSideEffect, false)
+	out, err = r2.Do(context.Background(), "", c2, &tape{}, up)
+	if err != nil || !out.Blocked || !strings.Contains(out.Message, "quarantined") {
+		t.Fatalf("quarantine = %+v err=%v", out, err)
+	}
+	if !r2.Status().Quarantined || len(r2.Status().Ambiguous) != 1 {
+		t.Fatalf("status = %+v", r2.Status())
+	}
+	if _, o := do(t, r2, "", llm("a", "plan"), f); !o.Replay {
+		t.Fatal("quarantine must not block replay of committed model calls")
+	}
+}
+
+func TestAmbiguousWithIdempotencyKeyRedispatches(t *testing.T) {
+	cf := journal.NewCrashFile()
+	r, err := Open("job", &nthFail{File: cf, fail: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{respond: unary}
+	do(t, r, "", llm("a", "plan"), f)
+	c := tool("send_email", `{"to":"a@b"}`, ClassSideEffect, true)
+	var keys []string
+	up := func(ctx context.Context, key string, e Emitter) (*Response, error) {
+		keys = append(keys, key)
+		return unary(int64(len(keys)), c)
+	}
+	if _, err := r.Do(context.Background(), "", c, &tape{}, up); err == nil {
+		t.Fatal("expected commit failure")
+	}
+	cf.LosePower(0, false)
+	r2, err := Open("job", cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := &tape{}
+	out, err := r2.Do(context.Background(), "", c, tp, up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Blocked || out.Replay || !strings.Contains(tp.String(), `"n":2`) {
+		t.Fatalf("redispatch = %s %+v", tp.String(), out)
+	}
+	if len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
+		t.Fatalf("keys = %v", keys)
+	}
+}
+
+func TestReadOnlyHasNoIntentAndReruns(t *testing.T) {
+	cf := journal.NewCrashFile()
+	r, err := Open("job", &nthFail{File: cf, fail: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := tool("search", `{"q":"x"}`, ClassReadOnly, false)
+	if _, err := r.Do(context.Background(), "", c, &tape{}, func(ctx context.Context, key string, e Emitter) (*Response, error) {
+		return unary(1, c)
+	}); err == nil {
+		t.Fatal("expected failure")
+	}
+	cf.LosePower(0, false)
+	r2, err := Open("job", cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, o := do(t, r2, "", c, &fake{respond: unary}); o.Replay || o.Blocked {
+		t.Fatalf("read-only should re-run, got %+v", o)
+	}
+	if r2.Status().Quarantined {
+		t.Fatal("read-only miss must not quarantine")
+	}
+}
+
+func TestToolBeforeFirstModelDoesNotStartAnAttempt(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	defer s.Close()
+	r := openRun(t, s, "job")
+	f := &fake{respond: unary}
+	do(t, r, "", tool("search", `{"q":"x"}`, ClassReadOnly, false), f)
+	do(t, r, "", llm("a", "start"), f)
+	if got := len(r.Status().Attempts); got != 1 {
+		t.Fatalf("attempts = %d, want 1 (tools/list before the first model is not a restart)", got)
+	}
+}
+
+func TestIdempotencyKeyStableAndShaped(t *testing.T) {
+	a := IdempotencyKey("job", KindTool, "abc", 1)
+	b := IdempotencyKey("job", KindTool, "abc", 1)
+	c := IdempotencyKey("job", KindTool, "abc", 2)
+	if a != b || a == c || !strings.HasPrefix(a, "wj1-") || len(a) != 4+26 {
+		t.Fatalf("keys %q %q %q", a, b, c)
+	}
+}
+
+// nthFail fails the n-th Sync (1-based) without making it durable.
+type nthFail struct {
+	journal.File
+	n, fail int
+}
+
+func (f *nthFail) Sync() error {
+	f.n++
+	if f.n == f.fail {
+		return errors.New("injected fsync failure")
+	}
+	return f.File.Sync()
 }

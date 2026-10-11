@@ -14,7 +14,20 @@ import (
 // Kind separates call namespaces. It is part of the hash input.
 type Kind string
 
-const KindLLM Kind = "llm"
+const (
+	KindLLM  Kind = "llm"
+	KindTool Kind = "tool"
+	KindMCP  Kind = "mcp"
+)
+
+// Class is how a tool is treated at the ambiguous window.
+type Class uint8
+
+const (
+	ClassReadOnly   Class = 1
+	ClassIdempotent Class = 2
+	ClassSideEffect Class = 3
+)
 
 // Call is one canonicalized request.
 type Call struct {
@@ -22,6 +35,9 @@ type Call struct {
 	Canonical []byte
 	// Label names the call in reports: the model or the tool.
 	Label string
+	Class Class
+	// HonorKey means the tool server dedupes on the derived idempotency key.
+	HonorKey bool
 }
 
 type Usage struct {
@@ -65,7 +81,9 @@ type Writer interface {
 type Upstream func(ctx context.Context, idempotencyKey string, e Emitter) (*Response, error)
 
 type Outcome struct {
-	Replay bool
+	Replay  bool
+	Blocked bool
+	Message string
 }
 
 var (
@@ -78,9 +96,17 @@ var (
 
 // Status is the read model behind GET /r/{run}/status.
 type Status struct {
-	Run      string          `json:"run"`
-	Recorded int             `json:"recorded_calls"`
-	Attempts []AttemptStatus `json:"attempts"`
+	Run         string          `json:"run"`
+	Recorded    int             `json:"recorded_calls"`
+	Quarantined bool            `json:"quarantined"`
+	Ambiguous   []AmbiguousCall `json:"ambiguous,omitempty"`
+	Attempts    []AttemptStatus `json:"attempts"`
+}
+
+type AmbiguousCall struct {
+	Kind  Kind   `json:"kind"`
+	Label string `json:"label"`
+	K     int    `json:"k"`
 }
 
 type AttemptStatus struct {
@@ -111,19 +137,24 @@ type Divergence struct {
 	At       time.Time `json:"at"`
 }
 
-const recCommit = "commit"
+const (
+	recCommit = "commit"
+	recIntent = "intent"
+)
 
 // record is the journal payload. Response bodies are base64 inside JSON.
 type record struct {
-	T     string    `json:"t"`
-	Kind  Kind      `json:"kind"`
-	Hash  string    `json:"hash"`
-	K     int       `json:"k"`
-	A     int       `json:"a"`
-	Label string    `json:"label,omitempty"`
-	Canon []byte    `json:"canon,omitempty"`
-	Resp  *Response `json:"resp,omitempty"`
-	At    time.Time `json:"at"`
+	T        string    `json:"t"`
+	Kind     Kind      `json:"kind"`
+	Hash     string    `json:"hash"`
+	K        int       `json:"k"`
+	A        int       `json:"a"`
+	Label    string    `json:"label,omitempty"`
+	Canon    []byte    `json:"canon,omitempty"`
+	Class    Class     `json:"class,omitempty"`
+	HonorKey bool      `json:"honor,omitempty"`
+	Resp     *Response `json:"resp,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 func hashOf(k Kind, canonical []byte) string {

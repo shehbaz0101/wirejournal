@@ -2,6 +2,8 @@ package run
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,16 +103,20 @@ type state uint8
 const (
 	statePending state = iota + 1
 	stateCommitted
+	stateAmbiguous
 )
 
 type entry struct {
-	key    key
-	state  state
-	canon  []byte
-	label  string
-	resp   *Response
-	origin *attempt      // nil for entries recovered from the journal
-	done   chan struct{} // closed when a pending entry commits or is abandoned
+	key      key
+	state    state
+	canon    []byte
+	label    string
+	class    Class
+	honor    bool
+	resp     *Response
+	origin   *attempt      // nil for entries recovered from the journal
+	done     chan struct{} // closed when a pending entry commits or is abandoned
+	intended bool
 }
 
 // attempt is one life of the agent process. Occurrence counters restart
@@ -128,6 +134,7 @@ type attempt struct {
 	remaining int
 	// lineage is every model entry this attempt replayed or committed.
 	lineage    []*entry
+	sawFirst   bool
 	sawOther   bool
 	modelSteps int
 	stats      AttemptStatus
@@ -147,6 +154,7 @@ type Run struct {
 	lastAttempt int
 	cur         *attempt
 	attempts    []*attempt
+	quarantined bool
 }
 
 func newRun(id string) *Run {
@@ -154,6 +162,9 @@ func newRun(id string) *Run {
 }
 
 func (r *Run) Close() error { return r.log.Close() }
+
+// ID is the durable run identity.
+func (r *Run) ID() string { return r.id }
 
 func corrupt(off int64, format string, args ...any) error {
 	return fmt.Errorf("%w at offset %d: %s", ErrCorruptRecord, off, fmt.Sprintf(format, args...))
@@ -168,7 +179,22 @@ func (r *Run) apply(off int64, payload []byte) error {
 	if rec.K < 1 || rec.A < 1 {
 		return corrupt(off, "occurrence %d, attempt %d", rec.K, rec.A)
 	}
+	k := key{rec.Kind, rec.Hash, rec.K}
 	switch rec.T {
+	case recIntent:
+		if rec.Kind != KindTool || rec.Class != ClassSideEffect {
+			return corrupt(off, "intent for %s class %d", rec.Kind, rec.Class)
+		}
+		if hashOf(rec.Kind, rec.Canon) != rec.Hash {
+			return corrupt(off, "hash does not match the stored request")
+		}
+		if r.entries[k] != nil {
+			return corrupt(off, "second intent for %s/%d", rec.Label, rec.K)
+		}
+		r.entries[k] = &entry{key: k, state: stateAmbiguous, canon: rec.Canon, label: rec.Label, class: rec.Class, honor: rec.HonorKey, intended: true}
+		if !rec.HonorKey {
+			r.quarantined = true
+		}
 	case recCommit:
 		if rec.Resp == nil {
 			return corrupt(off, "commit without a response")
@@ -176,12 +202,15 @@ func (r *Run) apply(off int64, payload []byte) error {
 		if hashOf(rec.Kind, rec.Canon) != rec.Hash {
 			return corrupt(off, "hash does not match the stored request")
 		}
-		k := key{rec.Kind, rec.Hash, rec.K}
-		if r.entries[k] != nil {
+		e := r.entries[k]
+		if e != nil && e.state == stateCommitted {
 			return corrupt(off, "second commit for %s/%d", rec.Label, rec.K)
 		}
-		e := &entry{key: k, state: stateCommitted, canon: rec.Canon, label: rec.Label, resp: rec.Resp}
-		r.entries[k] = e
+		if e == nil {
+			e = &entry{key: k, canon: rec.Canon, label: rec.Label, class: rec.Class, honor: rec.HonorKey}
+			r.entries[k] = e
+		}
+		e.state, e.resp = stateCommitted, rec.Resp
 		if rec.Kind == KindLLM {
 			r.model = append(r.model, e)
 			if r.firstModel == "" {
@@ -201,10 +230,11 @@ const (
 	actLive action = iota + 1
 	actWait
 	actReplay
+	actAmbiguous
 )
 
 func (a action) String() string {
-	return [...]string{"?", "live", "wait", "replay"}[a]
+	return [...]string{"?", "live", "wait", "replay", "ambiguous"}[a]
 }
 
 func decide(e *entry) action {
@@ -213,6 +243,8 @@ func decide(e *entry) action {
 		return actLive
 	case e.state == statePending:
 		return actWait
+	case e.state == stateAmbiguous:
+		return actAmbiguous
 	default:
 		return actReplay
 	}
@@ -254,8 +286,23 @@ func (r *Run) Do(ctx context.Context, attemptID string, c Call, w Writer, up Ups
 			}
 			w.Finish(e.resp)
 			return Outcome{Replay: true}, nil
+		case actAmbiguous:
+			if e.honor {
+				e.state = statePending
+				e.origin = at
+				e.done = make(chan struct{})
+				r.mu.Unlock()
+				return r.live(ctx, e, w, up)
+			}
+			r.quarantined = true
+			r.mu.Unlock()
+			return Outcome{Blocked: true, Message: ambiguousMessage(e.label)}, nil
 		case actLive:
-			e = &entry{key: k, state: statePending, canon: c.Canonical, label: c.Label, origin: at, done: make(chan struct{})}
+			if c.Class == ClassSideEffect && r.quarantined {
+				r.mu.Unlock()
+				return Outcome{Blocked: true, Message: quarantineMessage}, nil
+			}
+			e = &entry{key: k, state: statePending, canon: c.Canonical, label: c.Label, class: c.Class, honor: c.HonorKey, origin: at, done: make(chan struct{})}
 			r.entries[k] = e
 			if c.Kind == KindLLM {
 				r.miss(at, c, step)
@@ -277,10 +324,12 @@ func (r *Run) selectAttempt(attemptID string, kind Kind, hash string) *attempt {
 	switch {
 	case r.cur == nil,
 		attemptID != "" && attemptID != r.cur.id,
-		attemptID == "" && isFirst && r.cur.sawOther:
+		attemptID == "" && isFirst && r.cur.sawFirst && r.cur.sawOther:
 		r.startAttempt(attemptID)
 	}
-	if !isFirst {
+	if isFirst {
+		r.cur.sawFirst = true
+	} else {
 		r.cur.sawOther = true
 	}
 	return r.cur
@@ -376,23 +425,39 @@ func (l *liveEmitter) Head(status int, ct string) {
 func (l *liveEmitter) Frame(p []byte) { l.w.Frame(p) }
 
 func (r *Run) live(ctx context.Context, e *entry, w Writer, up Upstream) (Outcome, error) {
+	if e.class == ClassSideEffect && !e.intended {
+		if err := r.appendRecord(record{T: recIntent, Kind: e.key.kind, Hash: e.key.hash, K: e.key.k, A: e.origin.n,
+			Label: e.label, Canon: e.canon, Class: e.class, HonorKey: e.honor, At: time.Now()}); err != nil {
+			r.abandon(e)
+			return Outcome{}, fmt.Errorf("%w: %v", ErrJournal, err)
+		}
+		e.intended = true
+	}
 	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), upstreamTimeout)
 	defer cancel()
 	em := &liveEmitter{w: w}
-	resp, err := up(uctx, "", em)
+	key := ""
+	if e.class == ClassSideEffect {
+		key = IdempotencyKey(r.id, e.key.kind, e.key.hash, e.key.k)
+	}
+	resp, err := up(uctx, key, em)
 	if err != nil {
-		r.abandon(e)
+		if e.intended {
+			r.markAmbiguous(e)
+		} else {
+			r.abandon(e)
+		}
 		return Outcome{}, fmt.Errorf("%w: %v", ErrUpstream, err)
 	}
 
 	rec := record{T: recCommit, Kind: e.key.kind, Hash: e.key.hash, K: e.key.k, A: e.origin.n,
-		Label: e.label, Canon: e.canon, Resp: resp, At: time.Now()}
-	b, err := json.Marshal(rec)
-	if err == nil {
-		err = r.log.Append(b)
-	}
-	if err != nil {
-		r.abandon(e)
+		Label: e.label, Canon: e.canon, Class: e.class, HonorKey: e.honor, Resp: resp, At: time.Now()}
+	if err := r.appendRecord(rec); err != nil {
+		if e.intended {
+			r.markAmbiguous(e)
+		} else {
+			r.abandon(e)
+		}
 		return Outcome{}, fmt.Errorf("%w: %v", ErrJournal, err)
 	}
 
@@ -430,18 +495,57 @@ func (r *Run) abandon(e *entry) {
 	close(e.done)
 }
 
+func (r *Run) markAmbiguous(e *entry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e.state = stateAmbiguous
+	if !e.honor {
+		r.quarantined = true
+	}
+	if e.done != nil {
+		select {
+		case <-e.done:
+		default:
+			close(e.done)
+		}
+	}
+}
+
+func (r *Run) appendRecord(rec record) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return r.log.Append(b)
+}
+
 // Status returns a snapshot for the status endpoint.
 func (r *Run) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st := Status{Run: r.id, Attempts: []AttemptStatus{}}
+	st := Status{Run: r.id, Quarantined: r.quarantined, Attempts: []AttemptStatus{}}
 	for _, e := range r.entries {
-		if e.state == stateCommitted {
+		switch e.state {
+		case stateCommitted:
 			st.Recorded++
+		case stateAmbiguous:
+			st.Ambiguous = append(st.Ambiguous, AmbiguousCall{Kind: e.key.kind, Label: e.label, K: e.key.k})
 		}
 	}
 	for _, at := range r.attempts {
 		st.Attempts = append(st.Attempts, at.stats)
 	}
 	return st
+}
+
+const quarantineMessage = "wirejournal: run quarantined; an earlier side-effecting call has an unknown outcome"
+
+func ambiguousMessage(label string) string {
+	return "wirejournal: " + label + " may already have run; the proxy died before recording the result and will not repeat it"
+}
+
+// IdempotencyKey is stable for (run, kind, hash, k) across attempts and crashes.
+func IdempotencyKey(run string, kind Kind, hash string, k int) string {
+	sum := sha256.Sum256([]byte(run + "\x00" + string(kind) + "\x00" + hash + "\x00" + fmt.Sprint(k)))
+	return "wj1-" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:16])
 }

@@ -12,12 +12,17 @@ type Chat interface {
 	ServeChat(w http.ResponseWriter, r *http.Request, rn *run.Run, attempt string)
 }
 
+// Tools is the journaled MCP gateway.
+type Tools interface {
+	ServeMCP(w http.ResponseWriter, r *http.Request, rn *run.Run, attempt string)
+}
+
 // Server is the process-wide HTTP handler: chat completions, status, and
-// later the MCP gateway.
+// the MCP gateway.
 type Server struct {
 	Store *run.Store
 	LLM   Chat
-	MCP   http.Handler
+	MCP   Tools
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -44,10 +49,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case tg.Path == "v1/chat/completions":
 		s.LLM.ServeChat(w, r, rn, tg.Attempt)
 	case tg.Path == "mcp" && s.MCP != nil:
-		r = r.Clone(r.Context())
-		r.Header.Set("X-Wirejournal-Run", tg.Run)
-		r.Header.Set("X-Wirejournal-Attempt", tg.Attempt)
-		s.MCP.ServeHTTP(w, r)
+		s.MCP.ServeMCP(w, r, rn, tg.Attempt)
 	default:
 		http.NotFound(w, r)
 	}
