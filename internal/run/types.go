@@ -115,11 +115,13 @@ type AttemptStatus struct {
 	StartedAt time.Time `json:"started_at"`
 	// Expected is the number of recorded model calls this attempt started
 	// with; replaying all of them means it caught up to the crash point.
-	Expected     int `json:"expected"`
-	Replayed     int `json:"replayed"`
-	Live         int `json:"live"`
-	TokensSaved  int `json:"tokens_saved"`
-	TokensBilled int `json:"tokens_billed"`
+	Expected      int `json:"expected"`
+	Replayed      int `json:"replayed"`
+	Live          int `json:"live"`
+	ModelReplayed int `json:"model_replayed"`
+	ModelLive     int `json:"model_live"`
+	TokensSaved   int `json:"tokens_saved"`
+	TokensBilled  int `json:"tokens_billed"`
 	// LiveAfterMS is the time from attempt start to its first live model
 	// call: how long the fast-forward took.
 	LiveAfterMS *float64    `json:"live_after_ms,omitempty"`

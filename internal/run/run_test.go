@@ -162,7 +162,7 @@ func TestReplayAfterRestartIsByteIdentical(t *testing.T) {
 	}
 	st := r2.Status()
 	a := st.Attempts[len(st.Attempts)-1]
-	if a.Replayed != 3 || a.Live != 0 || a.TokensSaved != 15+9+15 || a.Expected != 3 {
+	if a.Replayed != 3 || a.Live != 0 || a.ModelReplayed != 3 || a.ModelLive != 0 || a.TokensSaved != 15+9+15 || a.Expected != 3 {
 		t.Fatalf("attempt status = %+v", a)
 	}
 }

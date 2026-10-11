@@ -375,6 +375,7 @@ func (r *Run) consume(at *attempt, e *entry) {
 	if e.key.kind != KindLLM {
 		return
 	}
+	at.stats.ModelReplayed++
 	at.stats.TokensSaved += e.resp.Usage.Total()
 	at.lineage = append(at.lineage, e)
 	if at.isExp[e] && !at.consumed[e] {
@@ -468,6 +469,7 @@ func (r *Run) live(ctx context.Context, e *entry, w Writer, up Upstream) (Outcom
 	if e.key.kind == KindLLM {
 		r.model = append(r.model, e)
 		at.lineage = append(at.lineage, e)
+		at.stats.ModelLive++
 		at.stats.TokensBilled += resp.Usage.Total()
 	}
 	close(e.done)
